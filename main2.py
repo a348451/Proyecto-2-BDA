@@ -6,7 +6,7 @@ from datetime import datetime
 
 # Conéctate a la base de datos MongoDB
 client = pymongo.MongoClient("mongodb://localhost:27017/")
-db = client["kol"]
+db = client["blog"]
 
 # Definir las colecciones
 users_collection = db["users"]
@@ -37,7 +37,13 @@ def update_user(user_id, new_data):
 
 def delete_user(user_id):
     result = users_collection.delete_one({"_id": user_id})
-    return result.deleted_count
+    if result:
+        articles = find_article_ids_by_user_id(user_id)
+        for article_id in articles:
+            delete_article(article_id)
+        return result.deleted_count
+    else:
+        return 0
 
 # Funciones CRUD para artículos
 def create_article(user_id, title, date, text, tags, categories):
@@ -85,23 +91,45 @@ def read_article():
     return articles_collection.find()
 
 def update_article(article_id, new_data):
+    existing_article = articles_collection.find_one({"_id": article_id})
+    old_tags = existing_article.get("tags", [])
+    old_categories = existing_article.get("categories", [])
+
     result = articles_collection.update_one({"_id": article_id}, {"$set": new_data})
-    
+
     if "tags" in new_data:
-        tags = new_data["tags"]
-        for tag_id in tags:
-            update_tag(tag_id, {"$push": {"articles": article_id}})
+        new_tags = new_data["tags"]
+        for tag_id in old_tags:
+            update_tag_articles(tag_id, article_id, remove=True)
+        for tag_id in new_tags:
+            update_tag_articles(tag_id, article_id)
 
     if "categories" in new_data:
-        categories = new_data["categories"]
-        for category_id in categories:
-            update_category(category_id, {"$push": {"articles": article_id}})
+        new_categories = new_data["categories"]
+        for category_id in old_categories:
+            update_category_articles(category_id, article_id, remove=True)
+        for category_id in new_categories:
+            update_category_articles(category_id, article_id)
 
     return result.modified_count
 
 def delete_article(article_id):
-    result = articles_collection.delete_one({"_id": article_id})
-    return result.deleted_count
+    deleted_article = articles_collection.find_one({"_id": article_id})
+    old_tags = deleted_article.get("tags", [])
+    old_categories = deleted_article.get("categories", [])
+    comments= find_comments_by_article_id(article_id)
+
+    if deleted_article:
+        result = articles_collection.delete_one({"_id": article_id})
+        for tag_id in old_tags:
+            update_tag_articles(tag_id, article_id, remove=True)
+        for category_id in old_categories:
+            update_category_articles(category_id, article_id, remove=True)
+        for comment_id in comments:
+            delete_comment(comment_id)
+        return result.deleted_count
+    else:
+        return 0
 
 # Funciones CRUD para comentarios
 def create_comment(user_id, article_id, name, url):
@@ -121,7 +149,10 @@ def update_comment(comment_id, new_data):
 
 def delete_comment(comment_id):
     result = comments_collection.delete_one({"_id": comment_id})
-    return result.deleted_count
+    if result:
+        return result.deleted_count
+    else:
+        return 0
 
 # Funciones CRUD para tags
 def create_tag(name, url):
@@ -145,7 +176,11 @@ def update_tag(tag_id, new_name, new_url):
 
 def delete_tag(tag_id):
     result = tags_collection.delete_one({"_id": tag_id})
-    return result.deleted_count
+    if result:
+        remove_tag_from_articles(tag_id)
+        return result.deleted_count
+    else:
+        return 0
 
 # Funciones CRUD para categorías
 def create_category(name, url):
@@ -169,14 +204,46 @@ def update_category(category_id, new_name, new_url):
 
 def delete_category(category_id):
     result = categories_collection.delete_one({"_id": category_id})
-    return result.deleted_count
+    if result:
+        remove_category_from_articles(category_id)
+        return result.deleted_count
+    else:
+        return 0
+
+# Funciones extras para users
+def find_article_ids_by_user_id(user_id):
+    articles_cursor = articles_collection.find({"user_id": user_id}, {"_id": 1})
+    return [article["_id"] for article in articles_cursor]
 
 # Funciones extras para articles
-def update_tag_articles(tag_id, article_id):
-    tags_collection.update_one({"_id": tag_id}, {"$addToSet": {"articles": article_id}})
+def update_tag_articles(tag_id, article_id, remove=False):
+    if remove:
+        tags_collection.update_one({"_id": tag_id}, {"$pull": {"articles": article_id}})
+    else:
+        tags_collection.update_one({"_id": tag_id}, {"$addToSet": {"articles": article_id}})
 
-def update_category_articles(category_id, article_id):
-    categories_collection.update_one({"_id": category_id}, {"$addToSet": {"articles": article_id}})
+def update_category_articles(category_id, article_id, remove=False):
+    if remove:
+        categories_collection.update_one({"_id": category_id}, {"$pull": {"articles": article_id}})
+    else:
+        categories_collection.update_one({"_id": category_id}, {"$addToSet": {"articles": article_id}})
+
+def find_comments_by_article_id(article_id):
+    comments = comments_collection.find({"article_id": article_id},{"_id":1})
+    comment_ids =[comment["_id"] for comment in comments]
+    return comment_ids
+
+# Funcion extra tags
+def remove_tag_from_articles(tag_id):
+    articles_cursor = articles_collection.find({"tags": tag_id})
+    for article in articles_cursor:
+        articles_collection.update_one({"_id": article["_id"]}, {"$pull": {"tags": tag_id}})
+
+# Funcion extra categories
+def remove_category_from_articles(category_id):
+    articles_cursor = articles_collection.find({"categories": category_id})
+    for article in articles_cursor:
+        articles_collection.update_one({"_id": article["_id"]}, {"$pull": {"categories": category_id}})
 
 # Interfaz gráfica de usuario en Tkinter
 def execute_action():
@@ -214,19 +281,26 @@ def execute_action():
 
     elif selected_action == "Actualizar Usuario":
         user_id = askinteger("Actualizar Usuario", "ID del usuario a actualizar:")
-        if user_id is not None:
+        user_exists = users_collection.find_one({"_id": user_id})
+        if user_exists is not None:
             new_name = askstring("Actualizar Usuario", "Nuevo nombre:")
             if new_name is not None:
                 new_email = askstring("Actualizar Usuario", "Nuevo correo electrónico:")
                 if new_email is not None:
                     update_user(user_id, {"name": new_name, "email": new_email})
                     messagebox.showinfo("Notificación", "Usuario actualizado correctamente.")
+        else:
+            messagebox.showinfo("Error", "El Usuario ingresado no existe")
 
     elif selected_action == "Eliminar Usuario":
         user_id = askinteger("Eliminar Usuario", "ID del usuario a eliminar:")
-        if user_id is not None:
-            delete_user(user_id)
-            messagebox.showinfo("Notificación", "Usuario eliminado correctamente.")
+        user_exists = users_collection.find_one({"_id": user_id}) is not None
+        if user_exists is not None:
+            deleted = delete_user(user_id)
+            if deleted != 0:
+                messagebox.showinfo("Notificación", "Usuario eliminado correctamente.")
+        else:
+            messagebox.showinfo("Error", "El Usuario ingresado no existe")
 
     ###################  Articulos  ########################
     elif selected_action == "Agregar Artículo":
@@ -235,12 +309,14 @@ def execute_action():
             text = askstring("Agregar Artículo", "Texto:")
             if text is not None:
                 user_id = askinteger("Agregar Artículo", "ID del usuario:")
-                tags = askstring("Agregar Artículo", "Tags (separados por comas):").split(',')
-                categories = askstring("Agregar Artículo", "Categorías (separadas por comas):").split(',')
-
-                article_id = create_article(user_id, title, datetime.now(), text, tags, categories)
-
-                messagebox.showinfo("Notificación", "Artículo agregado correctamente.")
+                user_exists = users_collection.find_one({"_id": user_id}) 
+                if user_exists is not None:
+                    tags = askstring("Agregar Artículo", "Tags (separados por comas):").split(',')
+                    categories = askstring("Agregar Artículo", "Categorías (separadas por comas):").split(',')
+                    article_id = create_article(user_id, title, datetime.now(), text, tags, categories)
+                    messagebox.showinfo("Notificación", "Artículo agregado correctamente.")
+                else:
+                    messagebox.showinfo("Error", "El Usuario ingresado no existe")
 
     elif selected_action == "Mostrar Articulos":
         articles_window = Toplevel(root)
@@ -265,7 +341,8 @@ def execute_action():
 
     elif selected_action == "Actualizar Artículo":
         article_id = askinteger("Actualizar Artículo", "ID del Artículo a actualizar:")
-        if article_id is not None:
+        article_exists = articles_collection.find_one({"_id":article_id})
+        if article_exists is not None:
             new_title = askstring("Actualizar Artículo", "Nuevo título:")
             if new_title is not None:
                 new_text = askstring("Actualizar Artículo", "Nuevo texto:")
@@ -276,36 +353,56 @@ def execute_action():
                     update_data = {"title": new_title, "text": new_text, "tags": [], "categories": []}
 
                     for tag_name in new_tags:
-                        tag_url = askstring("Actualizar Artículo", f"URL para el nuevo tag {tag_name}:")
-                        tag_id = create_tag(tag_name, tag_url)
+                        existing_tag = tags_collection.find_one({"name": tag_name})
+                        if existing_tag:
+                            tag_id = existing_tag["_id"]
+                        else:
+                            tag_url = askstring("Actualizar Artículo", f"URL para el nuevo tag {tag_name}:")
+                            tag_id = create_tag(tag_name, tag_url)
                         update_data["tags"].append(tag_id)
 
                     for category_name in new_categories:
-                        category_url = askstring("Actualizar Artículo", f"URL para la nueva categoría {category_name}:")
-                        category_id = create_category(category_name, category_url)
+                        existing_category = categories_collection.find_one({"name": category_name})
+                        if existing_category:
+                            category_id = existing_category["_id"]
+                        else:
+                            category_url = askstring("Actualizar Artículo", f"URL para la nueva categoría {category_name}:")
+                            category_id = create_category(category_name, category_url)
                         update_data["categories"].append(category_id)
 
                     update_article(article_id, update_data)
                     messagebox.showinfo("Notificación", "Artículo actualizado correctamente.")
+        else:
+            messagebox.showinfo("Error", "El artículo ingresado no existe.")
 
     elif selected_action == "Eliminar Artículo":
         article_id = askinteger("Eliminar Artículo", "ID del Artículo a eliminar:")
-        if article_id is not None:
-            delete_article(article_id)
-            messagebox.showinfo("Notificación", "Artículo eliminado correctamente.")
+        article_exists = articles_collection.find_one({"_id":article_id})
+        if article_exists is not None:
+            deleted=delete_article(article_id)
+            if deleted != 0:
+                messagebox.showinfo("Notificación", "Artículo eliminado correctamente.")
+        else:
+            messagebox.showinfo("Error", "El artículo ingresado no existe.")
 
     ###################  Comentarios  ########################
     elif selected_action == "Agregar Comentario":
         user_id = askinteger("Agregar Comentario", "ID del usuario:")
-        if user_id is not None:
+        user_exists = users_collection.find_one({"_id":user_id})
+        if user_exists is not None:
             article_id = askinteger("Agregar Comentario", "ID del Artículo:")
-            if article_id is not None:
+            article_exists = articles_collection.find_one({"_id": article_id})
+            if article_exists is not None:
                 name = askstring("Agregar Comentario", "Nombre:")
                 if name is not None:
                     url = askstring("Agregar Comentario", "URL:")
                     if url is not None:
                         create_comment(user_id, article_id, name, url)
                         messagebox.showinfo("Notificación", "Comentario agregado correctamente.")
+            else:
+                messagebox.showinfo("Error", "El Article ingresado no existe")
+        else:
+            messagebox.showinfo("Error", "El Usuario ingresado no existe")
 
     elif selected_action == "Mostrar Comentarios":
         comments_window = Toplevel(root)
@@ -330,7 +427,8 @@ def execute_action():
 
     elif selected_action == "Actualizar Comentario":
         comment_id = askinteger("Actualizar Comentario", "ID del Comentario a actualizar:")
-        if comment_id is not None:
+        comment_exists = comments_collection.find_one({"_id": comment_id})
+        if comment_exists is not None:
             new_name = askstring("Actualizar Comentario", "Nuevo nombre:")
             if new_name is not None:
                 new_url = askstring("Actualizar Comentario", "Nueva URL:")
@@ -340,9 +438,13 @@ def execute_action():
 
     elif selected_action == "Eliminar Comentario":
         comment_id = askinteger("Eliminar Comentario", "ID del Comentario a eliminar:")
-        if comment_id is not None:
-            delete_comment(comment_id)
-            messagebox.showinfo("Notificación", "Comentario eliminado correctamente.")
+        comment_exists = comments_collection.find_one({"_id": comment_id})
+        if comment_exists is not None:
+            deleted=delete_comment(comment_id)
+            if deleted != 0:
+                messagebox.showinfo("Notificación", "Comentario eliminado correctamente.")
+        else:
+            messagebox.showinfo("Error", "El comentario ingresado no existe.")
 
     ###################  Tags  ########################
     elif selected_action == "Agregar Tag":
@@ -376,7 +478,8 @@ def execute_action():
 
     elif selected_action == "Actualizar Tag":
         tag_id = askinteger("Actualizar Tag", "ID del Tag a actualizar:")
-        if tag_id is not None:
+        tag_exists = tags_collection.find_one({"_id":tag_id})
+        if tag_exists is not None:
             new_name = askstring("Actualizar Tag", "Nuevo nombre:")
             if new_name is not None:
                 new_url = askstring("Actualizar Tag", "Nueva URL:")
@@ -386,9 +489,13 @@ def execute_action():
 
     elif selected_action == "Eliminar Tag":
         tag_id = askinteger("Eliminar Tag", "ID del Tag a eliminar:")
-        if tag_id is not None:
-            delete_tag(tag_id)
-            messagebox.showinfo("Notificación", "Tag eliminado correctamente.")
+        tag_exists = tags_collection.find_one({"_id":tag_id})
+        if tag_exists is not None:
+            deleted=delete_tag(tag_id)
+            if deleted != 0:
+                messagebox.showinfo("Notificación", "Tag eliminado correctamente.")
+        else:
+            messagebox.showinfo("Error", "El Tag ingresado no existe.")
 
     ###################  Categories  ########################
     elif selected_action == "Agregar Categoria":
@@ -422,7 +529,8 @@ def execute_action():
 
     elif selected_action == "Actualizar Categoria":
         category_id = askinteger("Actualizar Categoría", "ID de la Categoría a actualizar:")
-        if category_id is not None:
+        category_exists = categories_collection.find_one({"_id":category_id})
+        if category_exists is not None:
             new_name = askstring("Actualizar Categoría", "Nuevo nombre:")
             if new_name is not None:
                 new_url = askstring("Actualizar Categoría", "Nueva URL:")
@@ -432,9 +540,13 @@ def execute_action():
 
     elif selected_action == "Eliminar Categoria":
         category_id = askinteger("Eliminar Categoría", "ID de la Categoría a eliminar:")
-        if category_id is not None:
-            delete_category(category_id)
-            messagebox.showinfo("Notificación", "Categoría eliminada correctamente.")
+        category_exists = categories_collection.find_one({"_id":category_id})
+        if category_exists is not None:
+            deleted=delete_category(category_id)
+            if deleted != 0:
+                messagebox.showinfo("Notificación", "Categoría eliminada correctamente.")
+        else:
+            messagebox.showinfo("Error", "La Categoria ingresada no existe.")
 
 # ComboBox
 action_var = tk.StringVar(root)
